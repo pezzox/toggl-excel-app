@@ -9,7 +9,6 @@ st.set_page_config(
     page_icon="📊",
     layout="centered"
 )
-st.set_option('server.maxUploadSize', 100)  # limite upload in MB
 
 # ---------- parsing ----------
 DUR_RE = re.compile(r"^\d{1,2}:\d{2}:\d{2}$")
