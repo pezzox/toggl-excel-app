@@ -34,19 +34,18 @@ def left_text_near(words_df, top, x_limit=200.0, y_tol=2.0):
 
 def client_text_near(words_df, top, y_tol=2.0):
     # Cerca il testo nella zona CLIENT (parte più a destra della tabella)
-    # Usa una soglia dinamica basata sulla larghezza della pagina
     if words_df.empty:
         return ""
     
-    page_width = words_df["x1"].max() if not words_df.empty else 800
-    x_threshold = page_width * 0.7  # Cerca negli ultimi 30% della larghezza
-    
+    # Usa una soglia fissa più sicura
     local = words_df[
         (words_df["top"] >= top - y_tol) &
         (words_df["top"] <= top + y_tol) &
-        (words_df["x0"] > x_threshold)
+        (words_df["x0"] > 500)  # Cerca tutto quello che inizia oltre x=500
     ].sort_values("x0")
-    return " ".join(local["text"].astype(str).tolist()).strip()
+    
+    client_text = " ".join(local["text"].astype(str).tolist()).strip()
+    return client_text if client_text else ""
 
 def classify_left(left: str):
     if not left: return None, None
