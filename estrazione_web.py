@@ -3,14 +3,11 @@ from io import BytesIO
 import pandas as pd
 import pdfplumber, re, tempfile
 
-
-
 st.set_page_config(
     page_title="Toggl → Excel",
     page_icon="📊",
     layout="centered"
 )
-# ---------- configurazione pagina ---------- # st.set_option('server.maxUploadSize', 100)  # ← toglila
 
 # ---------- parsing ----------
 DUR_RE = re.compile(r"^\d{1,2}:\d{2}:\d{2}$")
@@ -32,48 +29,69 @@ def left_text_near(words_df, top, x_limit=200.0, y_tol=2.0):
     ].sort_values("x0")
     return " ".join(local["text"].astype(str).tolist()).strip()
 
-def client_text_near(words_df, top, y_tol=2.0):
-    # Cerca il testo nella zona CLIENT (parte più a destra della tabella)
-    if words_df.empty:
-        return ""
-    
-    # Usa una soglia fissa più sicura
+def guess_client_xmin(words_df, page_width):
+    """
+    Trova l'ascissa minima della colonna CLIENT.
+    1) Se l'header 'CLIENT' è presente, usa la sua x0 (meno un piccolo margine).
+    2) Altrimenti fallback sulla parte più destra del testo (quantile 0.85).
+    """
+    mask_hdr = words_df["text"].astype(str).str.strip().str.lower().eq("client")
+    if mask_hdr.any():
+        return float(words_df.loc[mask_hdr, "x0"].min()) - 5.0
+    # fallback robusto: prendiamo il quantile alto delle x come bordo sinistro della zona "client"
+    return float(words_df["x0"].quantile(0.85))
+
+def right_text_near(words_df, top, x_min, y_tol=2.0):
+    """
+    Testo sulla destra (colonna CLIENT). Esclude il trattino dell'AMOUNT.
+    """
     local = words_df[
         (words_df["top"] >= top - y_tol) &
         (words_df["top"] <= top + y_tol) &
-        (words_df["x0"] > 500)  # Cerca tutto quello che inizia oltre x=500
+        (words_df["x0"] >= x_min)
     ].sort_values("x0")
-    
-    client_text = " ".join(local["text"].astype(str).tolist()).strip()
-    return client_text if client_text else ""
+    if local.empty:
+        return ""
+    texts = local["text"].astype(str)
+    texts = texts[~texts.eq("-")]              # escludi AMOUNT '-'
+    return " ".join(texts.tolist()).strip()
 
 def classify_left(left: str):
     if not left: return None, None
     lo = left.lower()
     if lo.startswith("total"): return "TOTAL", None
     if lo.startswith("without"): return "Without project", None
-    if re.search(r"\(\d+\)\s*$", left): 
+    if re.search(r"\(\d+\)\s*$", left):
         return re.sub(r"\s*\(\d+\)$", "", left).strip(), None
     return None, left  # membro
 
 def parse_page(page):
     words = extract_words_page(page)
     if words.empty: return []
+
     dur = words[words["text"].astype(str).str.match(DUR_RE)].sort_values("top")
     pct = words[words["text"].astype(str).str.match(PCT_RE)].sort_values("top")
+
+    # stima della colonna 'CLIENT' per questa pagina
+    client_xmin = guess_client_xmin(words, page.width)
+
     rows = []
     for (_, d), (_, p) in zip(dur.iterrows(), pct.iterrows()):
-        left = left_text_near(words, float(d["top"]))
-        client = client_text_near(words, float(d["top"]))
+        line_top = float(d["top"])
+        left = left_text_near(words, line_top)
         proj, mem = classify_left(left)
-        if proj is None and mem is None: continue
+        if proj is None and mem is None:
+            continue
+
+        client_text = right_text_near(words, line_top, client_xmin)
+
         rows.append({
             "PROJECT": proj,
             "MEMBER": mem,
             "DURATION": d["text"],
             "DURATION_%": p["text"],
             "AMOUNT": "-",
-            "CLIENT": client
+            "CLIENT": client_text if proj else ""  # niente client per i membri
         })
     return rows
 
@@ -86,11 +104,14 @@ def process_pdf(file_bytes: bytes) -> pd.DataFrame:
         with pdfplumber.open(tmp.name) as pdf:
             for i in range(1, len(pdf.pages)):  # salta sempre pagina 1
                 all_rows.extend(parse_page(pdf.pages[i]))
+
     df = pd.DataFrame(all_rows)
     if not df.empty:
         # tieni solo progetti (no membri)
         df = df[df["MEMBER"].isna() | (df["MEMBER"].astype(str).str.strip() == "")]
         df["DURATION_%"] = df["DURATION_%"].astype(str).str.replace(",", ".", regex=False)
+        # pulizia extra della colonna CLIENT
+        df["CLIENT"] = df["CLIENT"].astype(str).str.strip()
     return df
 
 def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
@@ -126,3 +147,4 @@ if uploaded:
         )
 else:
     st.info("⬆️ Carica un file PDF per iniziare.")
+
