@@ -8,7 +8,6 @@ st.set_page_config(
     page_icon="📊",
     layout="centered"
 )
-
 # ---------- parsing ----------
 DUR_RE = re.compile(r"^\d{1,2}:\d{2}:\d{2}$")
 PCT_RE = re.compile(r"^\d{1,3}(?:\.\d+)?%$")
@@ -23,7 +22,23 @@ def extract_words_page(page):
     )
     return pd.DataFrame(words) if words else pd.DataFrame()
 
-def left_text_near(words_df, top, x_limit=200.0, y_tol=2.0):
+# === NOVITÀ: calcolo dinamico dei bordi colonne ===
+def guess_left_xlimit(words_df, default=260.0):
+    """Usa la posizione dell'header 'DURATION' come bordo destro della colonna sinistra."""
+    mask = words_df["text"].astype(str).str.strip().str.lower().eq("duration")
+    if mask.any():
+        return float(words_df.loc[mask, "x0"].min()) - 5.0
+    return default
+
+def guess_client_xmin(words_df, default_quantile=0.85):
+    """Usa la posizione dell'header 'CLIENT' come bordo sinistro della colonna client, altrimenti quantile destro."""
+    mask = words_df["text"].astype(str).str.strip().str.lower().eq("client")
+    if mask.any():
+        return float(words_df.loc[mask, "x0"].min()) - 5.0
+    return float(words_df["x0"].quantile(default_quantile))
+
+# === funzioni di lettura riga ===
+def left_text_near(words_df, top, x_limit, y_tol=5.0):
     local = words_df[
         (words_df["top"] >= top - y_tol) &
         (words_df["top"] <= top + y_tol) &
@@ -31,21 +46,25 @@ def left_text_near(words_df, top, x_limit=200.0, y_tol=2.0):
     ].sort_values("x0")
     return " ".join(local["text"].astype(str).tolist()).strip()
 
-def client_text_near(words_df, top, x_min=400.0, y_tol=2.0):
-    """Prendi il testo nella fascia destra (colonna CLIENT)."""
+def client_text_near(words_df, top, x_min, y_tol=5.0):
     local = words_df[
         (words_df["top"] >= top - y_tol) &
         (words_df["top"] <= top + y_tol) &
-        (words_df["x0"] > x_min)
+        (words_df["x0"] >= x_min)
     ].sort_values("x0")
-    return " ".join(local["text"].astype(str).tolist()).strip()
+    if local.empty:
+        return ""
+    texts = local["text"].astype(str)
+    # escludi l'eventuale "-" dell'AMOUNT
+    texts = texts[~texts.eq("-")]
+    return " ".join(texts.tolist()).strip()
 
 def classify_left(left: str):
     if not left: return None, None
     lo = left.lower()
     if lo.startswith("total"): return "TOTAL", None
     if lo.startswith("without"): return "Without project", None
-    if re.search(r"\(\d+\)\s*$", left): 
+    if re.search(r"\(\d+\)\s*$", left):
         return re.sub(r"\s*\(\d+\)$", "", left).strip(), None
     return None, left  # membro
 
@@ -54,14 +73,19 @@ def parse_page(page):
     if words.empty: return []
     dur = words[words["text"].astype(str).str.match(DUR_RE)].sort_values("top")
     pct = words[words["text"].astype(str).str.match(PCT_RE)].sort_values("top")
+
+    # nuovi limiti dinamici
+    x_left_limit = guess_left_xlimit(words)
+    x_client_min = guess_client_xmin(words)
+
     rows = []
     for (_, d), (_, p) in zip(dur.iterrows(), pct.iterrows()):
         top_val = float(d["top"])
-        left = left_text_near(words, top_val)
+        left = left_text_near(words, top_val, x_left_limit)  # usa limite dinamico
         proj, mem = classify_left(left)
-        if proj is None and mem is None: 
+        if proj is None and mem is None:
             continue
-        client = client_text_near(words, top_val)
+        client = client_text_near(words, top_val, x_client_min)  # estrai CLIENT sulla destra
         rows.append({
             "PROJECT": proj,
             "MEMBER": mem,
@@ -86,6 +110,7 @@ def process_pdf(file_bytes: bytes) -> pd.DataFrame:
         # tieni solo progetti (no membri)
         df = df[df["MEMBER"].isna() | (df["MEMBER"].astype(str).str.strip() == "")]
         df["DURATION_%"] = df["DURATION_%"].astype(str).str.replace(",", ".", regex=False)
+        df["CLIENT"] = df["CLIENT"].astype(str).str.strip()
     return df
 
 def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
